@@ -2,40 +2,25 @@ const { Pool } = require('pg');
 require('dotenv').config();
 
 const setupDatabase = async () => {
-    const pool = new Pool({
-        host: process.env.DB_HOST,
-        user: process.env.DB_USER,
-        password: process.env.DB_PASSWORD,
-        port: process.env.DB_PORT || 5432,
-    });
-
-    try {
-        // Create database if it doesn't exist
-        await pool.query('CREATE DATABASE medical_university_db');
-        console.log('Database created successfully');
-    } catch (error) {
-        if (error.code !== '42P04') { // Database already exists
-            console.error('Error creating database:', error);
-        }
-    } finally {
-        await pool.end();
-    }
-
-    // Connect to the specific database
     const dbPool = new Pool({
         host: process.env.DB_HOST,
         user: process.env.DB_USER,
         password: process.env.DB_PASSWORD,
         database: process.env.DB_NAME,
         port: process.env.DB_PORT || 5432,
+        ssl: { rejectUnauthorized: false } // Required for Render
     });
 
     try {
-        // Create tables
-        await dbPool.query(`
-            CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+        console.log("Running database setup...");
 
-            -- Users table (for all types of users)
+        // Enable uuid extension
+        await dbPool.query(`CREATE EXTENSION IF NOT EXISTS "uuid-ossp";`);
+
+        // Create all tables
+        await dbPool.query(`
+
+            -- Users table
             CREATE TABLE IF NOT EXISTS users (
                 id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
                 email VARCHAR(255) UNIQUE NOT NULL,
@@ -44,6 +29,7 @@ const setupDatabase = async () => {
                 first_name VARCHAR(100) NOT NULL,
                 last_name VARCHAR(100) NOT NULL,
                 phone VARCHAR(20),
+                profile_image VARCHAR(500),
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
@@ -58,14 +44,14 @@ const setupDatabase = async () => {
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
 
-            -- Subjects table with year information (UPDATED VERSION)
+            -- Subjects table
             CREATE TABLE IF NOT EXISTS subjects (
                 id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
                 name VARCHAR(255) NOT NULL,
                 code VARCHAR(50) UNIQUE NOT NULL,
                 program_id UUID NOT NULL,
-                academic_year INTEGER NOT NULL CHECK (academic_year >= 1 AND academic_year <= 6),
-                semester INTEGER NOT NULL CHECK (semester >= 1 AND semester <= 2),
+                academic_year INTEGER NOT NULL CHECK (academic_year BETWEEN 1 AND 6),
+                semester INTEGER NOT NULL CHECK (semester IN (1,2)),
                 credits INTEGER NOT NULL,
                 description TEXT,
                 FOREIGN KEY (program_id) REFERENCES programs(id) ON DELETE CASCADE
@@ -106,7 +92,64 @@ const setupDatabase = async () => {
                 UNIQUE(student_id, subject_id, academic_year, semester)
             );
 
-            -- Subject assignments (professors to subjects)
+            -- Events
+            CREATE TABLE IF NOT EXISTS events (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                title VARCHAR(500) NOT NULL,
+                description TEXT,
+                location VARCHAR(255) NOT NULL,
+                image_url TEXT,
+                date DATE NOT NULL,
+                created_by UUID NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            -- Event Attendance
+            CREATE TABLE IF NOT EXISTS event_attendance (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                event_id UUID NOT NULL,
+                student_id UUID NOT NULL,
+                marked_by UUID NOT NULL,
+                status VARCHAR(20) CHECK (status IN ('present', 'absent')) DEFAULT 'absent',
+                marked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                notes TEXT,
+                FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE,
+                FOREIGN KEY (student_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY (marked_by) REFERENCES users(id) ON DELETE CASCADE,
+                UNIQUE (event_id, student_id)
+            );
+
+            -- Event Certificates
+            CREATE TABLE IF NOT EXISTS event_certificates (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                event_id UUID NOT NULL,
+                student_id UUID NOT NULL,
+                generated_by UUID NOT NULL,
+                certificate_url TEXT,
+                certificate_path TEXT,
+                status VARCHAR(20) CHECK (status IN ('generated', 'viewed')) DEFAULT 'generated',
+                generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                viewed_at TIMESTAMP,
+                FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE,
+                FOREIGN KEY (student_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY (generated_by) REFERENCES users(id) ON DELETE CASCADE,
+                UNIQUE(event_id, student_id)
+            );
+
+            -- Email Logs
+            CREATE TABLE IF NOT EXISTS certificate_email_logs (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                certificate_id UUID NOT NULL,
+                student_email VARCHAR(255) NOT NULL,
+                sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                status VARCHAR(20) CHECK (status IN ('sent', 'failed')) DEFAULT 'sent',
+                error_message TEXT,
+                FOREIGN KEY (certificate_id) REFERENCES event_certificates(id) ON DELETE CASCADE
+            );
+
+            -- Assignments
             CREATE TABLE IF NOT EXISTS subject_assignments (
                 id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
                 lecturer_id UUID NOT NULL,
@@ -116,7 +159,7 @@ const setupDatabase = async () => {
                 FOREIGN KEY (subject_id) REFERENCES subjects(id) ON DELETE CASCADE
             );
 
-            -- Lectures table
+            -- Lectures
             CREATE TABLE IF NOT EXISTS lectures (
                 id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
                 subject_id UUID NOT NULL,
@@ -133,7 +176,7 @@ const setupDatabase = async () => {
                 FOREIGN KEY (lecturer_id) REFERENCES users(id) ON DELETE CASCADE
             );
 
-            -- Attendance table
+            -- Attendance
             CREATE TABLE IF NOT EXISTS attendance (
                 id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
                 lecture_id UUID NOT NULL,
@@ -147,36 +190,83 @@ const setupDatabase = async () => {
                 FOREIGN KEY (marked_by) REFERENCES users(id) ON DELETE CASCADE,
                 UNIQUE (lecture_id, student_id)
             );
+
+            -- Announcements
+            CREATE TABLE IF NOT EXISTS announcements (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                title VARCHAR(500) NOT NULL,
+                type VARCHAR(50),
+                subject VARCHAR(255),
+                image_url TEXT,
+                date DATE NOT NULL,
+                created_by UUID NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            -- Campus News
+            CREATE TABLE IF NOT EXISTS campus_news (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                title VARCHAR(500) NOT NULL,
+                summary TEXT NOT NULL,
+                subject VARCHAR(255),
+                image_url TEXT,
+                date DATE NOT NULL,
+                created_by UUID NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            -- Registrations
+            CREATE TABLE IF NOT EXISTS event_registrations (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                event_id UUID NOT NULL,
+                user_id UUID NOT NULL,
+                registration_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                status VARCHAR(20) CHECK (status IN ('registered', 'cancelled')) DEFAULT 'registered',
+                FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                UNIQUE (event_id, user_id)
+            );
+
+            -- Student Profiles
+            CREATE TABLE IF NOT EXISTS student_profiles (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                user_id UUID NOT NULL UNIQUE,
+                roll_no VARCHAR(50) UNIQUE,
+                admission_year INTEGER NOT NULL CHECK (admission_year BETWEEN 2000 AND 2030),
+                category VARCHAR(50),
+                date_of_birth DATE,
+                guardian_name VARCHAR(255),
+                guardian_mobile VARCHAR(20),
+                address TEXT,
+                emergency_contact VARCHAR(20),
+                blood_group VARCHAR(5),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
         `);
 
-        console.log('All tables created successfully!');
+        console.log("Tables created successfully!");
 
-        // Create indexes for better performance
+        // Create indexes
         await dbPool.query(`
             CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
             CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
-            CREATE INDEX IF NOT EXISTS idx_subjects_program_id ON subjects(program_id);
-            CREATE INDEX IF NOT EXISTS idx_subjects_academic_year ON subjects(academic_year);
-            CREATE INDEX IF NOT EXISTS idx_subjects_semester ON subjects(semester);
-            CREATE INDEX IF NOT EXISTS idx_lectures_subject_id ON lectures(subject_id);
-            CREATE INDEX IF NOT EXISTS idx_lectures_lecturer_id ON lectures(lecturer_id);
-            CREATE INDEX IF NOT EXISTS idx_lectures_scheduled_date ON lectures(scheduled_date);
-            CREATE INDEX IF NOT EXISTS idx_attendance_lecture_id ON attendance(lecture_id);
-            CREATE INDEX IF NOT EXISTS idx_attendance_student_id ON attendance(student_id);
-            CREATE INDEX IF NOT EXISTS idx_program_enrollments_student_id ON program_enrollments(student_id);
-            CREATE INDEX IF NOT EXISTS idx_subject_enrollments_student_id ON subject_enrollments(student_id);
         `);
 
-        console.log('Indexes created successfully!');
+        console.log("Indexes created successfully!");
 
     } catch (error) {
-        console.error('Error setting up database:', error);
+        console.error("Error setting up database:", error);
     } finally {
         await dbPool.end();
     }
 };
 
-// Run setup if this file is executed directly
 if (require.main === module) {
     setupDatabase();
 }
